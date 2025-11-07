@@ -1,0 +1,13 @@
+flask
+python-dotenv
+sqlalchemy
+psycopg2-binary
+pgvector
+requests
+pdfplumber
+python-docx
+azure-identity
+azure-storage-blob
+openai
+numpy
+clamd
