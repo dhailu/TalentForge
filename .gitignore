@@ -2,3 +2,4 @@ resource.txt
 aivenv/
 .env
 *.csv
+__pycache__
