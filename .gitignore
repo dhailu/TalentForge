@@ -2,4 +2,5 @@ ai_venv/
 resource.txt
 data/
 app/__pycache__
-
+.env
+.env.*
