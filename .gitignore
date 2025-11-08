@@ -1,5 +1,5 @@
+ai_venv/
 resource.txt
-aivenv/
-.env
-*.csv
-__pycache__
+data/
+app/__pycache__
+

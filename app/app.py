@@ -1,102 +1,112 @@
-import os, tempfile, uuid
-from flask import Flask, request, jsonify, render_template
-from dotenv import load_dotenv
-load_dotenv()
+from flask import Flask, render_template, request, redirect, url_for
+import os
+from datetime import datetime
+from sqlalchemy import text
+from db import get_engine
+from screener import screen_resume
+from utils import extract_text_docling
 
-from db import init_db, SessionLocal
-from azure_storage_client import upload_to_adls
-from extractor import extract_text_local, sanitize_text
-from docling_client import DoclingClient
-from virus_scan import scan_file
-from embedding import azure_get_embedding
-from models import ResumeMetadata
-from screener import screen_resumes
+app = Flask(__name__)
+UPLOAD_FOLDER = "uploads"
+RESULTS_FOLDER = "results"
 
-# init
-init_db()
-app = Flask(__name__, template_folder="templates")
-UPLOAD_DIR = os.path.join(os.getcwd(), "uploads")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(os.path.join(RESULTS_FOLDER, "good"), exist_ok=True)
+os.makedirs(os.path.join(RESULTS_FOLDER, "bad"), exist_ok=True)
 
-# optionally use docling if configured
-use_docling = bool(os.getenv("DOCLING_URL"))
-if use_docling:
-    docling = DoclingClient()
+engine = get_engine()
 
-@app.route("/")
+@app.route("/", methods=["GET", "POST"])
 def index():
-    return render_template("index.html")
+    if request.method == "POST":
+        file = request.files["resume"]
+        if file:
+            file_path = os.path.join(UPLOAD_FOLDER, file.filename)
+            file.save(file_path)
 
-@app.route("/upload-resume", methods=["POST"])
-def upload_resume():
-    if "file" not in request.files:
-        return jsonify({"error": "No file"}), 400
-    f = request.files["file"]
-    filename = f.filename
-    local_path = os.path.join(UPLOAD_DIR, filename)
-    f.save(local_path)
+            text = extract_text_docling(file_path)
+            label, score = screen_resume(file_path, RESULTS_FOLDER)
 
-    # 1. virus scan
-    clean, reason = scan_file(local_path)
-    if not clean:
-        return jsonify({"error": "file failed virus scan", "reason": reason}), 400
+            # Log screening result
+            # with engine.begin() as conn:
+            #     conn.execute(
+            #         f"CREATE TABLE IF NOT EXISTS resumes (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, score INTEGER, result TEXT, created_at datetime)"
+            #         if "sqlite" in str(engine.url)
+            #         else f"CREATE TABLE IF NOT EXISTS resumes (id SERIAL PRIMARY KEY, name TEXT, score INTEGER, result TEXT, created_at datetime)"
+            #     )
+            #     conn.execute(
+            #         "INSERT INTO resumes (name, score, result, created_at) VALUES (%s, %s, %s, %s)",
+            #         (file.filename, score, label, datetime.now().isoformat())
+            #         if "postgres" in str(engine.url)
+            #         else (file.filename, score, label, datetime.now().isoformat()),
+            #     )
 
-    # 2. parse (docling if configured else local)
-    try:
-        if use_docling:
-            text = docling.parse(local_path)
-        else:
-            text = extract_text_local(local_path)
-    except Exception as e:
-        return jsonify({"error": "parsing failed", "detail": str(e)}), 500
 
-    # 3. sanitize
-    text_clean = sanitize_text(text)
+        # with engine.begin() as conn:
+        #     # Create table
+        #     if "sqlite" in str(engine.url):
+        #         conn.execute(text("""
+        #             CREATE TABLE IF NOT EXISTS resumes (
+        #                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+        #                 name TEXT,
+        #                 score INTEGER,
+        #                 result TEXT,
+        #                 created_at TEXT
+        #             )
+        #         """))
+        #     else:
+        #         conn.execute(text("""
+        #             CREATE TABLE IF NOT EXISTS resumes (
+        #                 id SERIAL PRIMARY KEY,
+        #                 name TEXT,
+        #                 score INTEGER,
+        #                 result TEXT,
+        #                 created_at TIMESTAMP
+        #             )
+        #         """))
 
-    # 4. upload raw to ADLS (blob path)
-    try:
-        blob_path = upload_to_adls(local_path, f"raw/{uuid.uuid4().hex}_{filename}")
-    except Exception as e:
-        return jsonify({"error": "upload failed", "detail": str(e)}), 500
+        #     # Insert record safely
+        #     insert_stmt = text("""
+        #         INSERT INTO resumes (name, score, result, created_at)
+        #         VALUES (:name, :score, :result, :created_at)
+        #     """)
 
-    # 5. generate embedding
-    try:
-        emb = azure_get_embedding(text_clean)
-    except Exception as e:
-        return jsonify({"error": "embedding failed", "detail": str(e)}), 500
+        #     conn.execute(
+        #         insert_stmt,
+        #         {
+        #             "name": file.filename,
+        #             "score": score,
+        #             "result": label,
+        #             "created_at": datetime.now().isoformat()
+        #         }
+        #     )
+        from sqlalchemy import Table, Column, Integer, String, MetaData, insert
 
-    # 6. persist to DB
-    from db import SessionLocal
-    db = SessionLocal()
-    try:
-        rec = ResumeMetadata(
-            filename=filename,
-            blob_path=blob_path,
-            text_content=text_clean,
-            embedding=emb
+        metadata = MetaData()
+        resumes = Table(
+            "resumes",
+            metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("name", String),
+            Column("score", Integer),
+            Column("result", String),
+            Column("created_at", String),
         )
-        db.add(rec)
-        db.commit()
-        db.refresh(rec)
-    finally:
-        db.close()
 
-    return jsonify({"message": "uploaded", "id": rec.id, "filename": filename}), 201
+        with engine.begin() as conn:
+            metadata.create_all(engine)  # create table if not exists
+            stmt = insert(resumes).values(
+                name=file.filename,
+                score=score,
+                result=label,
+                created_at=datetime.now().isoformat()
+            )
+            conn.execute(stmt)
 
-@app.route("/screen-resumes", methods=["POST"])
-def screen():
-    body = request.get_json()
-    if not body or "job_description" not in body:
-        return jsonify({"error":"job_description required"}), 400
-    job_text = body["job_description"]
-    res = screen_resumes(job_text)
-    return jsonify({"summary": {"good": len(res["good"]), "bad": len(res["bad"])}, "details": res})
 
-@app.route("/health")
-def health():
-    return jsonify({"status":"ok"})
+            return render_template("index.html", msg=f"Resume '{file.filename}' classified as {label} (Score: {score})")
 
+    return render_template("index.html")
 if __name__ == "__main__":
-    host = os.getenv("FLASK_HOST", "0.0.0.0")
-    port = int(os.getenv("FLASK_PORT", "8000"))
-    app.run(host=host, port=port)
+    app.run(host="0.0.0.0", debug=True, port=8000) # Run on port 5000
+

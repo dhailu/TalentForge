@@ -1,17 +1,38 @@
 import os
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from dotenv import load_dotenv
-load_dotenv()
+from pathlib import Path
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise ValueError("DATABASE_URL is required in .env")
+def get_engine():
+    """
+    Dynamically create SQLAlchemy engine.
+    - Supports SQLite (default) and PostgreSQL.
+    - Ensures SQLite directory exists.
+    """
+    db_type = os.getenv("DB_TYPE", "sqlite").lower()
 
-engine = create_engine(DATABASE_URL, pool_size=10, max_overflow=20)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    try:
+        if db_type == "postgres":
+            user = os.getenv("POSTGRES_USER")
+            password = os.getenv("POSTGRES_PASSWORD")
+            host = os.getenv("POSTGRES_HOST", "localhost")
+            db = os.getenv("POSTGRES_DB", "resume_ai_db")
+            port = os.getenv("POSTGRES_PORT", "5432")
 
-def init_db():
-    # create tables
-    from models import Base
-    Base.metadata.create_all(bind=engine)
+            url = f"postgresql://{user}:{password}@{host}:{port}/{db}"
+            print(f"Connecting to PostgreSQL at {host}:{port}/{db}")
+        
+        else:
+            # Default to SQLite
+            sqlite_path = os.getenv("SQLITE_DB_PATH", "data/sqlite.db")
+            Path(os.path.dirname(sqlite_path)).mkdir(parents=True, exist_ok=True)
+
+            url = f"sqlite:///{sqlite_path}"
+            print(f"Using SQLite at {sqlite_path}")
+
+        # Create SQLAlchemy engine
+        engine = create_engine(url, echo=False)
+        return engine
+
+    except Exception as e:
+        print(f" Error creating database engine: {e}")
+        raise
