@@ -4,3 +4,7 @@ data/
 app/__pycache__
 .env
 .env.*
+results/good/*
+results/bad/*
+results/good/*.pdf
+results/bad/*.pdf
